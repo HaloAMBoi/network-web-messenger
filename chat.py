@@ -14,8 +14,8 @@ logging_enabled = False
 log_file = "chat_log.txt"
 
 # Secrets for API
-BROADCAST_PIN = "2016"   # Secret for /api/broadcast
-LOGGING_PIN = "26126"     # Secret for /api/logging
+BROADCAST_PIN = "1234"   # Secret for /api/broadcast
+LOGGING_PIN = "5678"     # Secret for /api/logging
 
 # ------------------------
 # HTML Template (use your previous chat HTML)
@@ -207,7 +207,7 @@ def api_broadcast():
     if pin != BROADCAST_PIN:
         return jsonify({"status":"error", "reason":"Invalid PIN"}), 403
     msg = {
-        "user": "System",
+        "user": "Broadcast",
         "text": f"[Broadcast] {text}",
         "time": datetime.now().strftime("%H:%M")
     }
