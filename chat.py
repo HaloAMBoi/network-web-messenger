@@ -1,20 +1,26 @@
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit
 from datetime import datetime
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# In-memory messages
+# ------------------------
+# CONFIG
+# ------------------------
 messages = []
 MAX_MESSAGES = 100
-
-# Logging
+logging_enabled = False
 log_file = "chat_log.txt"
-logging_enabled = False  # Controlled by chat commands
 
-# HTML with username prompt, cached per device
-html = """
+# Secrets for API
+BROADCAST_PIN = "2016"   # Secret for /api/broadcast
+LOGGING_PIN = "26126"     # Secret for /api/logging
+
+# ------------------------
+# HTML Template (use your previous chat HTML)
+# ------------------------
+chat_html = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -169,18 +175,87 @@ if (username) startChat();
 </script>
 </body>
 </html>
-"""
+"""  # Keep the full HTML from your previous version with username prompt + web chat
 
+# ------------------------
+# ROUTES
+# ------------------------
 @app.route("/")
 def index():
-    return render_template_string(html)
+    return render_template_string(chat_html)
 
-def save_message_to_file(msg):
+@app.route("/api/messages")
+def api_messages():
+    return jsonify(messages[-MAX_MESSAGES:])
+
+@app.route("/api/send_message", methods=["POST"])
+def api_send_message():
+    data = request.json
+    if "user" in data and "text" in data:
+        append_message(data)
+        return jsonify({"status":"ok"})
+    return jsonify({"status":"error"}), 400
+
+# ------------------------
+# BROADCAST API
+# ------------------------
+@app.route("/api/broadcast", methods=["POST"])
+def api_broadcast():
+    data = request.json
+    pin = data.get("pin")
+    text = data.get("message")
+    if pin != BROADCAST_PIN:
+        return jsonify({"status":"error", "reason":"Invalid PIN"}), 403
+    msg = {
+        "user": "System",
+        "text": f"[Broadcast] {text}",
+        "time": datetime.now().strftime("%H:%M")
+    }
+    append_message(msg)
+    return jsonify({"status":"ok"})
+
+# ------------------------
+# LOGGING API
+# ------------------------
+@app.route("/api/logging", methods=["POST"])
+def api_logging():
+    data = request.json
+    pin = data.get("pin")
+    state = data.get("state")
     global logging_enabled
-    if logging_enabled:
-        with open(log_file, "a", encoding="utf-8") as f:
+
+    if pin != LOGGING_PIN:
+        return jsonify({"status":"error","reason":"Invalid PIN"}), 403
+    if state not in ["true","false"]:
+        return jsonify({"status":"error","reason":"Invalid state"}), 400
+
+    logging_enabled = True if state == "true" else False
+    status_text = f"Logging {'enabled ✅' if logging_enabled else 'disabled ❌'} via API"
+
+    msg = {
+        "user": "System",
+        "text": status_text,
+        "time": datetime.now().strftime("%H:%M")
+    }
+    append_message(msg)
+    return jsonify({"status":"ok", "logging":logging_enabled})
+
+# ------------------------
+# HELPER
+# ------------------------
+def append_message(msg):
+    messages.append(msg)
+    if len(messages) > MAX_MESSAGES:
+        messages.pop(0)
+    socketio.emit("new_message", msg)
+    # Save to log if enabled or if msg is logging toggle itself
+    if logging_enabled or ("Logging enabled" in msg["text"] or "Logging disabled" in msg["text"]):
+        with open(log_file,"a",encoding="utf-8") as f:
             f.write(f"[{msg['time']}] {msg['user']}: {msg['text']}\n")
 
+# ------------------------
+# SOCKET.IO EVENTS
+# ------------------------
 @socketio.on("join")
 def handle_join(username):
     emit("load_messages", messages)
@@ -189,86 +264,43 @@ def handle_join(username):
         "text": f"{username} joined the chat 👋",
         "time": datetime.now().strftime("%H:%M")
     }
-    messages.append(join_notice)
-    if len(messages) > MAX_MESSAGES:
-        messages.pop(0)
-    socketio.emit("new_message", join_notice)
-    save_message_to_file(join_notice)
+    append_message(join_notice)
 
-@socketio.on("send_message")
 @socketio.on("send_message")
 def handle_send(data):
-    """
-    Handles all incoming messages from clients.
-    Supports commands:
-      - 'clear' => clears chat for everyone
-      - 'logging:true' => enable TXT logging
-      - 'logging:false' => disable TXT logging
-    Normal messages are appended and optionally logged.
-    """
-    global logging_enabled
     text_lower = data["text"].strip().lower()
 
-    # ----- COMMAND: Toggle Logging -----
+    # Command: logging:true/false
     if text_lower.startswith("logging:"):
         value = text_lower.split(":")[1].strip()
+        global logging_enabled
         if value == "true":
             logging_enabled = True
-            status_msg = {
-                "user": "System",
-                "text": f"Logging enabled ✅ by {data['user']}",
-                "time": data["time"]
-            }
+            msg_text = f"Logging enabled ✅ by {data['user']}"
         elif value == "false":
             logging_enabled = False
-            status_msg = {
-                "user": "System",
-                "text": f"Logging disabled ❌ by {data['user']}",
-                "time": data["time"]
-            }
+            msg_text = f"Logging disabled ❌ by {data['user']}"
         else:
-            # Invalid command
-            status_msg = {
-                "user": "System",
-                "text": f"Invalid logging command: {data['text']}",
-                "time": data["time"]
-            }
-        # Append to memory, emit to all clients, optionally log
-        messages.append(status_msg)
-        if len(messages) > 100:
-            messages.pop(0)
-        socketio.emit("new_message", status_msg)
-        if logging_enabled:
-            save_message_to_file(status_msg)
+            msg_text = f"Invalid logging command: {data['text']}"
+        append_message({"user":"System","text":msg_text,"time":data["time"]})
         return
 
-    # ----- COMMAND: Clear chat -----
+    # Command: clear
     if text_lower == "clear":
         messages.clear()
         socketio.emit("clear_messages")
-        # System feedback to all clients
-        status_msg = {
-            "user": "System",
-            "text": f"Chat cleared ✅ by {data['user']}",
-            "time": data["time"]
-        }
-        messages.append(status_msg)
-        if len(messages) > 100:
-            messages.pop(0)
-        socketio.emit("new_message", status_msg)
-        # Clear TXT file if logging enabled
+        msg_text = f"Chat cleared ✅ by {data['user']}"
+        append_message({"user":"System","text":msg_text,"time":data["time"]})
         if logging_enabled:
-            with open(log_file, "w", encoding="utf-8") as f:
+            with open(log_file,"w",encoding="utf-8") as f:
                 f.write(f"=== Chat cleared by {data['user']} at {data['time']} ===\n")
         return
 
-    # ----- NORMAL MESSAGE -----
-    messages.append(data)
-    if len(messages) > 100:
-        messages.pop(0)
-    socketio.emit("new_message", data)
-    save_message_to_file(data)
+    # Normal message
+    append_message(data)
 
-
-if __name__ == "__main__":
+# ------------------------
+# RUN
+# ------------------------
+if __name__=="__main__":
     socketio.run(app, host="0.0.0.0", port=8942)
